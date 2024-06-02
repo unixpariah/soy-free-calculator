@@ -7,7 +7,6 @@
   };
 
   outputs = {
-    self,
     nixpkgs,
     flake-utils,
     ...
@@ -25,6 +24,7 @@
             wayland
             wayland-scanner
             wayland-protocols
+            cairo
           ];
         };
       in {

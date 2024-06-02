@@ -1,3 +1,4 @@
+#include <cairo/cairo.h>
 #include <linux/input-event-codes.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -11,6 +12,19 @@
 #include "shm.h"
 #include "xdg-shell-client-protocol.h"
 
+#define PADDING 15
+
+#define WINW 400
+#define WINH 600
+
+#define PANELH WINW / 3
+#define PANELW WINW - PADDING * 2
+
+#define DEGREES 3.14159265358979323846 / 180.0
+
+#define SQUARE_COLOR 0.3137
+#define SQUARE_RADIUS 8
+
 typedef struct {
         void *shm_data;
         struct wl_surface *surface;
@@ -19,8 +33,10 @@ typedef struct {
         struct wl_compositor *compositor;
         struct xdg_wm_base *xdg_wm_base;
         struct wl_registry *registry;
+        struct wl_buffer *buffer;
+        struct wl_seat *seat;
         bool configured;
-        bool running;
+        bool exit;
         int width;
         int height;
 } state;
@@ -36,14 +52,14 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
   .ping = xdg_wm_base_handle_ping,
 };
 
+void draw(state *state);
+
 static void xdg_surface_handle_configure(void *data,
                                          struct xdg_surface *xdg_surface,
                                          uint32_t serial) {
     state *state = data;
     xdg_surface_ack_configure(xdg_surface, serial);
-    if (state->configured) {
-        wl_surface_commit(state->surface);
-    }
+    draw(state);
     state->configured = true;
 }
 
@@ -54,7 +70,7 @@ static const struct xdg_surface_listener xdg_surface_listener = {
 static void xdg_toplevel_handle_close(void *data,
                                       struct xdg_toplevel *xdg_toplevel) {
     state *state = data;
-    state->running = false;
+    state->exit = true;
 }
 
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
@@ -69,8 +85,7 @@ static void handle_global(void *data, struct wl_registry *registry,
     if (strcmp(interface, wl_shm_interface.name) == 0) {
         state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
-        // struct wl_seat *seat =
-        //   wl_registry_bind(registry, name, &wl_seat_interface, 1);
+        state->seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
     } else if (strcmp(interface, wl_compositor_interface.name) == 0) {
         state->compositor =
           wl_registry_bind(registry, name, &wl_compositor_interface, 1);
@@ -112,35 +127,93 @@ static struct wl_buffer *create_buffer(state *state) {
 
     close(fd);
 
-    memset(state->shm_data, 255, size);
-
     return buffer;
+}
+
+void create_rounded_rect(cairo_t *context, int width, int height, int x, int y,
+                         const char *text, int font_size) {
+    double aspect = 1.0, corner_radius = (double)height / SQUARE_RADIUS;
+    double radius = corner_radius / aspect;
+
+    cairo_new_sub_path(context);
+    cairo_arc(context, x + width - radius, y + radius, radius, -90 * DEGREES,
+              0 * DEGREES);
+    cairo_arc(context, x + width - radius, y + height - radius, radius,
+              0 * DEGREES, 90 * DEGREES);
+    cairo_arc(context, x + radius, y + height - radius, radius, 90 * DEGREES,
+              180 * DEGREES);
+    cairo_arc(context, x + radius, y + radius, radius, 180 * DEGREES,
+              270 * DEGREES);
+    cairo_close_path(context);
+
+    cairo_set_source_rgb(context, SQUARE_COLOR, SQUARE_COLOR, SQUARE_COLOR);
+    cairo_fill_preserve(context);
+
+    cairo_text_extents_t extents;
+    cairo_text_extents(context, text, &extents);
+
+    int center_x = x + (width >> 1);
+    int center_y = y + (height >> 1);
+
+    double text_x = center_x - (extents.width / 2) - extents.x_bearing;
+    double text_y = center_y - (extents.height / 2) - extents.y_bearing;
+
+    cairo_move_to(context, text_x, text_y);
+    cairo_set_source_rgb(context, 1, 1, 1);
+    cairo_set_font_size(context, font_size);
+    cairo_show_text(context, text);
+}
+
+static const char *icons[20] = {"%", "C", "CE", "/", "7", "8", "9",
+                                "*", "4", "5",  "6", "-", "1", "2",
+                                "3", "+", " ",  "0", ".", "="};
+
+static void output_frame_handle_done(void *data, struct wl_callback *callback,
+                                     unsigned int time) {
+    state *state = data;
+    draw(state);
+}
+
+static struct wl_callback_listener output_frame_listener = {
+  .done = output_frame_handle_done,
+};
+
+void draw(state *state) {
+    struct wl_callback *frame_callback = wl_surface_frame(state->surface);
+    wl_callback_add_listener(frame_callback, &output_frame_listener, state);
+
+    wl_surface_attach(state->surface, state->buffer, 0, 0);
+    wl_surface_commit(state->surface);
 }
 
 int main() {
     struct wl_display *display = wl_display_connect(NULL);
     if (display == NULL) {
         fprintf(stderr, "failed to create display\n");
-        return EXIT_FAILURE;
+        return 1;
     }
 
     state state = {
       .registry = wl_display_get_registry(display),
-      .running = true,
+      .exit = false,
       .configured = false,
-      .width = 128,
-      .height = 128,
+      .width = WINW,
+      .height = WINH,
     };
 
     wl_registry_add_listener(state.registry, &registry_listener, &state);
     if (wl_display_roundtrip(display) == -1) {
-        return EXIT_FAILURE;
+        return 1;
     }
 
     if (state.shm == NULL || state.compositor == NULL ||
         state.xdg_wm_base == NULL) {
-        fprintf(stderr, "no wl_shm, wl_compositor or xdg_wm_base support\n");
-        return EXIT_FAILURE;
+        return 1;
+    }
+
+    state.buffer = create_buffer(&state);
+    if (state.buffer == NULL) {
+        return 1;
     }
 
     state.surface = wl_compositor_create_surface(state.compositor);
@@ -156,21 +229,25 @@ int main() {
     while (wl_display_dispatch(display) != -1 && !state.configured) {
     }
 
-    struct wl_buffer *buffer = create_buffer(&state);
-    if (buffer == NULL) {
-        return EXIT_FAILURE;
-    }
+    cairo_surface_t *surface = cairo_image_surface_create(
+      CAIRO_FORMAT_ARGB32, state.width, state.height);
+    cairo_t *context = cairo_create(surface);
+    cairo_set_source_rgb(context, 0, 0, 0);
+    cairo_paint_with_alpha(context, 1);
 
-    wl_surface_attach(state.surface, buffer, 0, 0);
-    wl_surface_commit(state.surface);
+    create_rounded_rect(context, PANELW, PANELH, PADDING, PADDING, icons[16],
+                        16);
 
-    while (wl_display_dispatch(display) != -1 && state.running) {
+    memcpy(state.shm_data, cairo_image_surface_get_data(surface),
+           state.height * state.width * 4);
+
+    while (wl_display_dispatch(display) != -1 && !state.exit) {
     }
 
     xdg_toplevel_destroy(state.xdg_toplevel);
     xdg_surface_destroy(xdg_surface);
     wl_surface_destroy(state.surface);
-    wl_buffer_destroy(buffer);
+    wl_buffer_destroy(state.buffer);
 
     return EXIT_SUCCESS;
 }
