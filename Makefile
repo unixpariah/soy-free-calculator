@@ -15,6 +15,9 @@ SOURCES=main.c xdg-shell-protocol.c shm.c
 
 all: soy-free-calc
 
+run: all
+	./soy-free-calc
+
 soy-free-calc: $(HEADERS) $(SOURCES)
 	$(CC) $(CFLAGS) -o $@ $(SOURCES) -lrt $(WAYLAND_FLAGS)
 
